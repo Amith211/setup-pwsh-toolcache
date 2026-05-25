@@ -188,7 +188,11 @@ runs:
         # -----------------------------
         # TOOLCACHE BASE (NEW)
         # -----------------------------
-        tool_root="${RUNNER_TOOL_CACHE:-${{ runner.temp }}/pwsh"
+        version="${{ steps.unix_like_download_pwsh.outputs.version }}"
+        os="${{ runner.os }}"
+        arch="$(uname -m)"
+        
+        tool_root="${RUNNER_TOOL_CACHE:-${{ runner.temp }}/pwsh}"
         install_dir="$tool_root/pwsh/$version/$os-$arch"
         
         # -----------------------------
