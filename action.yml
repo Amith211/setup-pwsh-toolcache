@@ -1,4 +1,4 @@
-name: setup PowerShell action
+name: setup PowerShell action (toolcache)
 description: downloads and unpacks PowerShell (pwsh) for gh actions
 inputs:
   token:
