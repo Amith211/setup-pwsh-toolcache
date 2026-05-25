@@ -1,5 +1,6 @@
 name: setup PowerShell action (toolcache)
 description: downloads and unpacks PowerShell (pwsh) for gh actions
+
 inputs:
   token:
     description: github personal access token
@@ -12,13 +13,48 @@ inputs:
 runs:
   using: composite
   steps:
-    # impl for Windows operating systems
+
+    # ------------------------------------------------------------
+    # 1. RESOLVE CACHE + INSTALL PATH (RUNS FIRST)
+    # ------------------------------------------------------------
+    - name: resolve install path
+      id: resolve
+      shell: bash
+      run: |
+        set -e
+
+        version="${{ inputs.tag }}"
+
+        if [ "${{ runner.os }}" = "Linux" ]; then
+          os="linux"
+        elif [ "${{ runner.os }}" = "macOS" ]; then
+          os="osx"
+        elif [ "${{ runner.os }}" = "Windows" ]; then
+          os="windows"
+        fi
+
+        arch="$(uname -m)"
+
+        tool_root="${RUNNER_TOOL_CACHE:-/opt/hostedtoolcache}"
+        install_dir="$tool_root/pwsh/$version/$os-$arch"
+
+        echo "install_dir=$install_dir" >> "$GITHUB_OUTPUT"
+
+        if [ -f "$install_dir/pwsh" ] || [ -f "$install_dir/pwsh.exe" ]; then
+          echo "cached=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "cached=false" >> "$GITHUB_OUTPUT"
+        fi
+
+
+    # ------------------------------------------------------------
+    # 2. WINDOWS DOWNLOAD (ONLY IF NOT CACHED)
+    # ------------------------------------------------------------
     - name: download PowerShell
       id: win32_download_pwsh
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && steps.resolve.outputs.cached != 'true'
       shell: powershell
       run: |
-        # resolve arch
         $arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
 
         if ($arch -eq "amd64") {
@@ -28,205 +64,137 @@ runs:
         } elseif ($arch -eq "x86") {
           $arch = "x86"
         } else {
-          throw "unsupported architecture called `$arch`; architectures that are supported are `amd64`, `arm64` and `x86`!"
+          throw "unsupported architecture called `$arch`"
         }
 
-        # build headers
         $headers = @{
           "Authorization" = "Bearer $env:token"
           "Content-Type"  = "application/json"
         }
 
-        # build uri
-        $uri = if ($env:tag -eq "latest")
-        {
+        $uri = if ($env:tag -eq "latest") {
           "https://api.github.com/repos/PowerShell/PowerShell/releases/latest"
-        }
-        else
-        {
+        } else {
           "https://api.github.com/repos/PowerShell/PowerShell/releases/tags/$env:tag"
         }
 
-        # build var for testing jq response and download pwsh
         $response = Invoke-RestMethod -Uri $uri -Headers $headers
         $tag = $response.tag_name
         $version = $tag -replace '^v', ''
+
         $name_version_os_arch_ext = "PowerShell-${version}-win-${arch}.zip"
-        $assets = $response.assets
+
         $obj = $response.assets | Where-Object { $_.name -eq $name_version_os_arch_ext }
-        if (-not $obj)
-        {
-            throw "asset not found; searched for `$name_version_os_arch_ext`!"
+
+        if (-not $obj) {
+          throw "asset not found"
         }
 
         Invoke-WebRequest -Uri $obj.browser_download_url -OutFile $obj.name -Headers $headers
 
-        "archive=$($obj.name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        "version=$version" | Out-File $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        "archive=$($obj.name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
 
-      env:
-        token: ${{ inputs.token }}
-        tag: ${{ inputs.tag }}
 
-    # TODO(mmacieje): `&` in powershell case does not do it here, unforunately
-    - name: unpack PowerShell
+    # ------------------------------------------------------------
+    # 3. WINDOWS UNPACK (ONLY IF NOT CACHED)
+    # ------------------------------------------------------------
+    - name: unpack PowerShell (Windows)
+      if: runner.os == 'Windows' && steps.resolve.outputs.cached != 'true'
+      shell: powershell
+      run: |
+        $installDir = "${{ steps.resolve.outputs.install_dir }}"
+
+        Expand-Archive `
+          -Path "${{ steps.win32_download_pwsh.outputs.archive }}" `
+          -DestinationPath $installDir
+
+
+    # ------------------------------------------------------------
+    # 4. WINDOWS PATH
+    # ------------------------------------------------------------
+    - name: add PowerShell to path (Windows)
       if: runner.os == 'Windows'
       shell: powershell
       run: |
-        $version = "${{ steps.win32_download_pwsh.outputs.version }}"
-        $arch = $env:PROCESSOR_ARCHITECTURE.ToLower()
-        
-        if ($arch -eq "amd64") { $arch = "x64" }
-        elseif ($arch -eq "arm64") { $arch = "arm64" }
-        elseif ($arch -eq "x86") { $arch = "x86" }
-      
-        $toolRoot = if ($env:RUNNER_TOOL_CACHE) {
-          $env:RUNNER_TOOL_CACHE
-        } else {
-          Join-Path ${{ runner.temp }} "pwsh"
-        }
-        
-        $installDir = Join-Path $toolRoot "pwsh\$version\win-$arch"
-        
-        # CACHE CHECK (NEW)
-        if (Test-Path (Join-Path $installDir "pwsh.exe")) {
-          Write-Host "Using cached PowerShell $version"
-          $installDir | Out-File $env:GITHUB_PATH -Append
-          "path=$installDir" | Out-File $env:GITHUB_OUTPUT -Append
-          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
-          exit 0
-        }
-        
-        Expand-Archive -Path ${{ steps.win32_download_pwsh.outputs.archive }} -DestinationPath $installDir
+        "${{ steps.resolve.outputs.install_dir }}" |
+          Out-File -FilePath $env:GITHUB_PATH -Append
 
-    - name: add PowerShell to path
-      if: runner.os == 'Windows'
-      shell: powershell
-      run: $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
-    # impl for Unix-like operating systems
-    - name: download PowerShell
+    # ------------------------------------------------------------
+    # 5. UNIX DOWNLOAD (ONLY IF NOT CACHED)
+    # ------------------------------------------------------------
+    - name: download PowerShell (unix)
       id: unix_like_download_pwsh
       if: runner.os == 'Linux' || runner.os == 'macOS'
+        && steps.resolve.outputs.cached != 'true'
       shell: bash
       run: |
         set -e
 
-        # resolve os
         if [ "${{ runner.os }}" = "Linux" ]; then
           os="linux"
-        elif [ "${{ runner.os }}" = "macOS" ]; then
+        else
           os="osx"
         fi
 
-        # resolve arch
         arch=$(uname -m)
-        if [ "$os" = "linux" ]; then
-          case "$arch" in
-            x86_64) arch="x64" ;;
-            aarch64) arch="arm64" ;;
-            armv7l) arch="arm32" ;;
-            *) echo "unsupported architecture called `$arch`; architectures that are supported are `arm64` and `arm32`!" >&2; exit 1 ;;
-          esac
-        elif [ "$os" = "osx" ]; then
-          case "$arch" in
-            x86_64) arch="x64" ;;
-            arm64) arch="arm64" ;;
-            *) echo "unsupported architecture called `$arch`; architectures that are supported are `x64` and `arm64`!" >&2; exit 1 ;;
-          esac
-        fi
 
-        # build headers
+        case "$arch" in
+          x86_64) arch="x64" ;;
+          aarch64) arch="arm64" ;;
+          armv7l) arch="arm32" ;;
+          *) echo "unsupported arch"; exit 1 ;;
+        esac
+
         headers=(-H "Authorization: Bearer $token" -H "Content-Type: application/json")
 
-        # build uri
         if [ "$tag" = "latest" ]; then
           uri="https://api.github.com/repos/PowerShell/PowerShell/releases/latest"
         else
           uri="https://api.github.com/repos/PowerShell/PowerShell/releases/tags/$tag"
         fi
 
-        # fetch release info
-        if command -v curl >/dev/null 2>&1; then
-          response=$(curl -s "${headers[@]}" "$uri")
-        elif command -v wget >/dev/null 2>&1; then
-          # wget doesn't directly allow multiple headers simply, but we can do:
-          # (if needed, but curl should be available by default on github runners)
-          response=$(wget -qO- --header="Authorization: Bearer $token" --header="Content-Type: application/json" "$uri")
-        else
-          echo "neither curl nor wget is available." >&2
-          exit 1
-        fi
+        response=$(curl -s "${headers[@]}" "$uri")
 
-        # build var for testing jq response and download pwsh
         _tag=$(echo "$response" | jq -r '.tag_name')
         version="${_tag#v}"
-        name_version_os_arch_ext="powershell-${version}-${os}-${arch}.tar.gz"
 
-        # extract download url using jq
-        url=$(echo $response | jq -r ".assets[] | select(.name == \"$name_version_os_arch_ext\") | .browser_download_url")
+        name="powershell-${version}-${os}-${arch}.tar.gz"
 
-        echo $url
+        url=$(echo "$response" | jq -r ".assets[] | select(.name == \"$name\") | .browser_download_url")
 
-        if [ -z "$url" ]; then
-          echo "asset not found; searched for `$name_version_os_arch_ext`!" >&2
-          exit 1
-        fi
+        curl -L "${headers[@]}" "$url" -o "$name"
 
-        # download the archive
-        if command -v curl >/dev/null 2>&1; then
-          curl -L "${headers[@]}" "$url" -o "$name_version_os_arch_ext"
-        else
-          # fallback to wget if needed
-          wget --header="Authorization: Bearer $token" --header="Content-Type: application/json" -O "$name_version_os_arch_ext" "$url"
-        fi
-
-        echo "archive=$name_version_os_arch_ext" >> "$GITHUB_OUTPUT"
+        echo "archive=$name" >> "$GITHUB_OUTPUT"
         echo "version=$version" >> "$GITHUB_OUTPUT"
 
-      env:
-        token: ${{ inputs.token }}
-        tag: ${{ inputs.tag }}
 
-    - name: unpack PowerShell
+    # ------------------------------------------------------------
+    # 6. UNIX UNPACK (ONLY IF NOT CACHED)
+    # ------------------------------------------------------------
+    - name: unpack PowerShell (unix)
       if: runner.os == 'Linux' || runner.os == 'macOS'
+        && steps.resolve.outputs.cached != 'true'
       shell: bash
       run: |
         set -e
 
-        # -----------------------------
-        # TOOLCACHE BASE (NEW)
-        # -----------------------------
-        version="${{ steps.unix_like_download_pwsh.outputs.version }}"
-        os="${{ runner.os }}"
-        arch="$(uname -m)"
-        
-        tool_root="${RUNNER_TOOL_CACHE:-${{ runner.temp }}/pwsh}"
-        install_dir="$tool_root/pwsh/$version/$os-$arch"
-        echo "$install_dir" >> "$GITHUB_PATH"
-        
-        # -----------------------------
-        # CACHE CHECK (NEW)
-        # -----------------------------
-        if [ -f "$install_dir/pwsh" ]; then
-          echo "Using cached PowerShell $version at $install_dir"
-          echo "$install_dir" >> $GITHUB_PATH
-          echo "path=$install_dir" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-        
-        # -----------------------------
-        # ORIGINAL BEHAVIOR (UNCHANGED except path)
-        # -----------------------------
+        install_dir="${{ steps.resolve.outputs.install_dir }}"
+
         mkdir -p "$install_dir"
-        tar -xf "${{ steps.unix_like_download_pwsh.outputs.archive }}" -C "$install_dir"
+
+        tar -xf "${{ steps.unix_like_download_pwsh.outputs.archive }}" \
+          -C "$install_dir"
+
         chmod +x "$install_dir/pwsh"
 
-    - name: add PowerShell to path
+
+    # ------------------------------------------------------------
+    # 7. PATH (UNIX)
+    # ------------------------------------------------------------
+    - name: add PowerShell to path (unix)
       if: runner.os == 'Linux' || runner.os == 'macOS'
       shell: bash
       run: |
-        set -e
-
-        echo "$install_dir" >> $GITHUB_PATH
+        echo "${{ steps.resolve.outputs.install_dir }}" >> $GITHUB_PATH
