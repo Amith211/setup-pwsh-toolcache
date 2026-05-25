@@ -71,12 +71,30 @@ runs:
     - name: unpack PowerShell
       if: runner.os == 'Windows'
       shell: powershell
-      run: Expand-Archive -Path ${{ steps.win32_download_pwsh.outputs.archive }} -DestinationPath ${{ runner.temp }}\pwsh
+      run: |
+        $toolRoot = if ($env:RUNNER_TOOL_CACHE) {
+          $env:RUNNER_TOOL_CACHE
+        } else {
+          Join-Path ${{ runner.temp }} "pwsh"
+        }
+        
+        $installDir = Join-Path $toolRoot "pwsh\$version\win-$arch"
+        
+        # CACHE CHECK (NEW)
+        if (Test-Path (Join-Path $installDir "pwsh.exe")) {
+          Write-Host "Using cached PowerShell $version"
+          $installDir | Out-File $env:GITHUB_PATH -Append
+          "path=$installDir" | Out-File $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File $env:GITHUB_OUTPUT -Append
+          exit 0
+        }
+        
+        Expand-Archive -Path ${{ steps.win32_download_pwsh.outputs.archive }} -DestinationPath $installDir
 
     - name: add PowerShell to path
       if: runner.os == 'Windows'
       shell: powershell
-      run: echo "${{ runner.temp }}\pwsh" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      run: $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
     # impl for Unix-like operating systems
     - name: download PowerShell
