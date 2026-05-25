@@ -167,9 +167,29 @@ runs:
       run: |
         set -e
 
-        mkdir -p ${{ runner.temp }}/pwsh
-        tar -xf ${{ steps.unix_like_download_pwsh.outputs.archive }} -C ${{ runner.temp }}/pwsh
-        chmod +x ${{ runner.temp }}/pwsh/pwsh
+        # -----------------------------
+        # TOOLCACHE BASE (NEW)
+        # -----------------------------
+        tool_root="${RUNNER_TOOL_CACHE:-${{ runner.temp }}/pwsh"
+        install_dir="$tool_root/pwsh/$version/$os-$arch"
+        
+        # -----------------------------
+        # CACHE CHECK (NEW)
+        # -----------------------------
+        if [ -f "$install_dir/pwsh" ]; then
+          echo "Using cached PowerShell $version at $install_dir"
+          echo "$install_dir" >> $GITHUB_PATH
+          echo "path=$install_dir" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        
+        # -----------------------------
+        # ORIGINAL BEHAVIOR (UNCHANGED except path)
+        # -----------------------------
+        mkdir -p "$install_dir"
+        tar -xf "${{ steps.unix_like_download_pwsh.outputs.archive }}" -C "$install_dir"
+        chmod +x "$install_dir/pwsh"
 
     - name: add PowerShell to path
       if: runner.os == 'Linux' || runner.os == 'macOS'
@@ -177,4 +197,4 @@ runs:
       run: |
         set -e
 
-        echo "${{ runner.temp }}/pwsh" >> $GITHUB_PATH
+        echo "$install_dir" >> $GITHUB_PATH
